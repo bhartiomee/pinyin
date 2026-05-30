@@ -24335,10 +24335,13 @@
     enabled: true,
     video: null,
     cues: [],
+    tabId: null,
+    cueTimeOffset: 0,
     originalLanguage: null,
     lastCue: null,
     banner: null,
-    overlay: null
+    overlay: null,
+    hasShownLoadedToast: false
   };
   init();
   async function init() {
@@ -24348,6 +24351,9 @@
       if (changes.enabled) {
         STATE.enabled = changes.enabled.newValue !== false;
         setOverlayText("");
+      }
+      if (changes.cuesByTab) {
+        restoreCachedCues({ activate: true });
       }
     });
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -24359,6 +24365,7 @@
     });
     await restoreCachedCues();
     waitForVideo();
+    document.addEventListener("fullscreenchange", ensureOverlayParent);
   }
   function waitForVideo() {
     const existingVideo = document.querySelector("video");
@@ -24390,23 +24397,37 @@
     }
     video.addEventListener("timeupdate", updateOverlay);
     video.addEventListener("play", updateOverlay);
+    updateOverlay();
   }
-  async function restoreCachedCues() {
-    const tab = await chrome.runtime.sendMessage({ type: "PING_TAB_ID" }).catch(() => null);
-    if (!tab?.id) {
+  async function restoreCachedCues({ activate = false } = {}) {
+    if (!STATE.tabId) {
+      const tab = await chrome.runtime.sendMessage({ type: "PING_TAB_ID" }).catch(() => null);
+      STATE.tabId = tab?.id || null;
+    }
+    if (!STATE.tabId) {
       return;
     }
     const result = await chrome.storage.local.get({ cuesByTab: {} });
-    const cached = result.cuesByTab?.[String(tab.id)];
+    const cached = result.cuesByTab?.[String(STATE.tabId)];
     if (cached?.cues?.length) {
-      STATE.cues = cached.cues;
+      applyCues(cached.cues, { restoreLanguage: false, showLoadedToast: activate });
     }
   }
   function handleChineseCues(cues) {
+    applyCues(cues, { restoreLanguage: true, showLoadedToast: true });
+  }
+  function applyCues(cues, { restoreLanguage = false, showLoadedToast = false } = {}) {
     STATE.cues = normalizeCues(cues);
+    STATE.cueTimeOffset = inferCueTimeOffset();
+    STATE.lastCue = null;
     hideSetupBanner();
-    switchBackToOriginalLanguage();
-    showToast("\u2713 Pinyin Captions loaded. Switch back to English subtitles.");
+    if (restoreLanguage) {
+      switchBackToOriginalLanguage();
+    }
+    if (showLoadedToast && !STATE.hasShownLoadedToast) {
+      showToast("\u2713 Pinyin Captions loaded. Switch back to English subtitles.");
+      STATE.hasShownLoadedToast = true;
+    }
     updateOverlay();
   }
   function normalizeCues(cues) {
@@ -24421,8 +24442,8 @@
       setOverlayText("");
       return;
     }
-    const currentTime = STATE.video.currentTime;
-    const activeCue = STATE.cues.find((cue) => currentTime >= cue.start && currentTime <= cue.end);
+    const currentTime = STATE.video.currentTime + STATE.cueTimeOffset;
+    const activeCue = findActiveCue(currentTime);
     if (!activeCue) {
       STATE.lastCue = null;
       setOverlayText("");
@@ -24449,7 +24470,7 @@
       fontSize: "22px",
       color: "white",
       textShadow: "0 0 6px black, 1px 1px 3px black",
-      zIndex: "99999",
+      zIndex: "2147483647",
       pointerEvents: "none",
       fontFamily: "sans-serif",
       letterSpacing: "0.05em",
@@ -24457,12 +24478,52 @@
       boxSizing: "border-box",
       lineHeight: "1.35"
     });
-    document.documentElement.appendChild(overlay);
     STATE.overlay = overlay;
+    ensureOverlayParent();
     return overlay;
   }
   function setOverlayText(text) {
-    createOverlay().textContent = text || "";
+    const overlay = createOverlay();
+    ensureOverlayParent();
+    overlay.textContent = text || "";
+  }
+  function ensureOverlayParent() {
+    if (!STATE.overlay) {
+      return;
+    }
+    const parent = document.fullscreenElement || document.body || document.documentElement;
+    if (STATE.overlay.parentElement !== parent) {
+      parent.appendChild(STATE.overlay);
+    }
+  }
+  function findActiveCue(currentTime) {
+    let low = 0;
+    let high = STATE.cues.length - 1;
+    while (low <= high) {
+      const index = Math.floor((low + high) / 2);
+      const cue = STATE.cues[index];
+      if (currentTime < cue.start) {
+        high = index - 1;
+      } else if (currentTime > cue.end) {
+        low = index + 1;
+      } else {
+        return cue;
+      }
+    }
+    return null;
+  }
+  function inferCueTimeOffset() {
+    if (!STATE.video || STATE.cues.length < 2) {
+      return 0;
+    }
+    const firstCue = STATE.cues[0];
+    const lastCue = STATE.cues[STATE.cues.length - 1];
+    const cueSpan = lastCue.end - firstCue.start;
+    const videoDuration = Number.isFinite(STATE.video.duration) ? STATE.video.duration : 0;
+    if (firstCue.start > 300 && videoDuration > 0 && cueSpan <= videoDuration + 300) {
+      return firstCue.start;
+    }
+    return 0;
   }
   function showSetupBanner() {
     if (STATE.banner || !isSupportedHost()) {
