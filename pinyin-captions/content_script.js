@@ -35,6 +35,12 @@ async function init() {
   });
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === 'SUBTITLE_CUES' && Array.isArray(message.cues)) {
+      handleSubtitleCues(message.cues, message.language);
+      sendResponse({ ok: true });
+    }
+    
+    // Backward compatibility with old CHINESE_CUES message type
     if (message?.type === 'CHINESE_CUES' && Array.isArray(message.cues)) {
       handleChineseCues(message.cues);
       sendResponse({ ok: true });
@@ -99,6 +105,11 @@ function attachVideo(video) {
 
   video.addEventListener('timeupdate', updateOverlay);
   video.addEventListener('play', updateOverlay);
+  video.addEventListener('pause', updateOverlay);
+  
+  // Monitor for subtitle changes (especially useful for Netflix when switching subs)
+  monitorSubtitleChanges();
+  
   updateOverlay();
 }
 
@@ -115,7 +126,16 @@ async function restoreCachedCues({ activate = false } = {}) {
   const result = await chrome.storage.local.get({ cuesByTab: {} });
   const cached = result.cuesByTab?.[String(STATE.tabId)];
   if (cached?.cues?.length) {
-    applyCues(cached.cues, { restoreLanguage: false, showLoadedToast: activate });
+ 
+
+function handleSubtitleCues(cues, language) {
+  // Handle both Chinese and English/other language subtitles
+  applyCues(cues, { 
+    restoreLanguage: language === 'zh', 
+    showLoadedToast: true,
+    language 
+  });
+}   applyCues(cached.cues, { restoreLanguage: false, showLoadedToast: activate });
   }
 }
 
@@ -134,7 +154,7 @@ function applyCues(cues, { restoreLanguage = false, showLoadedToast = false } = 
   }
 
   if (showLoadedToast && !STATE.hasShownLoadedToast) {
-    showToast('✓ Pinyin Captions loaded. Switch back to English subtitles.');
+    showToast('✓ Pinyin Captions loaded. Switch between subtitle languages to see Pinyin translations.');
     STATE.hasShownLoadedToast = true;
   }
 
@@ -158,23 +178,20 @@ function updateOverlay() {
     return;
   }
 
-  if (!STATE.cues.length) {
-    updateOverlayFromVisibleSubtitles();
-    return;
-  }
-
+  // Try using cached cues first
   const currentTime = STATE.video.currentTime + STATE.cueTimeOffset;
-  let activeCue = findActiveCue(currentTime);
+  let activeCue = STATE.cues.length ? findActiveCue(currentTime) : null;
 
-  if (!activeCue) {
+  // If no cached cues or cue not found, try to align using visible subtitles
+  if (!activeCue && STATE.cues.length) {
     if (tryAlignCueOffsetFromVisibleSubtitles()) {
       activeCue = findActiveCue(STATE.video.currentTime + STATE.cueTimeOffset);
     }
   }
 
+  // If still no cue, use fallback from visible subtitles
   if (!activeCue) {
-    STATE.lastCue = null;
-    setOverlayText('');
+    updateOverlayFromVisibleSubtitles();
     return;
   }
 
@@ -188,7 +205,7 @@ function updateOverlay() {
 }
 
 function updateOverlayFromVisibleSubtitles() {
-  const visibleText = getVisibleChineseSubtitleText();
+  const { text: visibleText, isChinese } = getVisibleSubtitleText();
 
   if (!visibleText) {
     STATE.usingVisibleSubtitleFallback = false;
@@ -197,7 +214,8 @@ function updateOverlayFromVisibleSubtitles() {
   }
 
   STATE.usingVisibleSubtitleFallback = true;
-  setOverlayText(convertToPinyin(visibleText));
+  const pinyin = convertToPinyin(visibleText);
+  setOverlayText(pinyin);
 }
 
 function createOverlay() {
@@ -314,14 +332,17 @@ function tryAlignCueOffsetFromVisibleSubtitles() {
   return true;
 }
 
-function getVisibleChineseSubtitleText() {
+function getVisibleSubtitleText() {
   const selectors = [
     '[class*="player-timedtext"]',
     '[class*="timedtext"]',
     '[class*="subtitle"]',
     '[class*="caption"]',
-    '[data-uia*="subtitle"]'
+    '[data-uia*="subtitle"]',
+    '.vjs-text-track-display',
+    '[role="region"][aria-live]'
   ];
+  
   const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
     .filter(element => element !== STATE.overlay && element !== STATE.banner)
     .map(element => ({
@@ -330,9 +351,9 @@ function getVisibleChineseSubtitleText() {
       rect: element.getBoundingClientRect()
     }))
     .filter(({ text, rect, element }) => {
+      if (!text.trim()) return false;
       const style = getComputedStyle(element);
-      return CHINESE_RE.test(text) &&
-        rect.width > 0 &&
+      return rect.width > 0 &&
         rect.height > 0 &&
         style.visibility !== 'hidden' &&
         style.display !== 'none' &&
@@ -340,7 +361,19 @@ function getVisibleChineseSubtitleText() {
     })
     .sort((a, b) => b.rect.bottom - a.rect.bottom);
 
-  return candidates[0]?.text || '';
+  const topCandidate = candidates[0];
+  if (!topCandidate) {
+    return { text: '', isChinese: false };
+  }
+  
+  const text = topCandidate.text;
+  const isChinese = CHINESE_RE.test(text);
+  return { text, isChinese };
+}
+
+function getVisibleChineseSubtitleText() {
+  const { text, isChinese } = getVisibleSubtitleText();
+  return isChinese ? text : '';
 }
 
 function normalizeComparableChinese(text) {
@@ -378,7 +411,7 @@ function showSetupBanner() {
   });
 
   const message = document.createElement('span');
-  message.textContent = "Pinyin Captions: Please switch to Chinese subtitles for a moment — we'll switch back automatically.";
+  message.textContent = "Pinyin Captions: Subtitles will automatically appear with Pinyin translations. Works with Chinese, English, and other language subtitles.";
 
   const dismiss = document.createElement('button');
   dismiss.type = 'button';
@@ -519,4 +552,44 @@ function escapeRegExp(value) {
 
 function isSupportedHost() {
   return SUPPORTED_HOSTS.some(host => location.hostname.includes(host));
+}
+
+function monitorSubtitleChanges() {
+  let lastSeenSubtitleText = '';
+  let lastCheckTime = 0;
+  let mutationCount = 0;
+  
+  const checkSubtitleChange = () => {
+    const now = Date.now();
+    if (now - lastCheckTime < 500) return; // Throttle to 500ms
+    lastCheckTime = now;
+    
+    const { text: currentText } = getVisibleSubtitleText();
+    
+    // If subtitle text changed significantly, trigger overlay update
+    if (currentText && currentText !== lastSeenSubtitleText) {
+      lastSeenSubtitleText = currentText;
+      STATE.lastCue = null; // Reset to force update
+      updateOverlay();
+    }
+  };
+  
+  // Use MutationObserver to detect subtitle DOM changes
+  // This is critical for Netflix when switching between subtitle languages
+  const observer = new MutationObserver(() => {
+    mutationCount++;
+    if (mutationCount % 3 === 0) { // Throttle observer calls
+      checkSubtitleChange();
+    }
+  });
+  
+  // Start observing after a brief delay to ensure DOM is ready
+  setTimeout(() => {
+    observer.observe(document.body || document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      characterDataOldValue: false
+    });
+  }, 1000);
 }

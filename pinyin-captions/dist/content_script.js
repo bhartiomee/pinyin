@@ -24314,19 +24314,30 @@
   // pinyin-captions/pinyin_converter.js
   var HTML_TAG_RE = /<\/?(font|i|b|ruby|rt|rp|span|div|br|p|c|v|lang|em|strong)[^>]*>/gi;
   var ANY_TAG_RE = /<[^>]*>/g;
+  var CHINESE_CHARS_RE = /[\u4e00-\u9fff]/g;
   function cleanChineseText(input) {
     return String(input || "").replace(HTML_TAG_RE, " ").replace(ANY_TAG_RE, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/\s+/g, " ").trim();
   }
-  function convertToPinyin(chineseText) {
-    const cleaned = cleanChineseText(chineseText);
-    if (!cleaned) {
+  function convertToPinyin(text) {
+    try {
+      const cleaned = cleanChineseText(text);
+      if (!cleaned) {
+        return "";
+      }
+      const chineseChars = cleaned.match(CHINESE_CHARS_RE);
+      if (!chineseChars || !chineseChars.length) {
+        return "";
+      }
+      const result = pinyin(cleaned, {
+        toneType: "symbol",
+        type: "array",
+        nonZh: "consecutive"
+      }).join(" ");
+      return result || "";
+    } catch (error) {
+      console.error("Pinyin conversion error:", error);
       return "";
     }
-    return pinyin(cleaned, {
-      toneType: "symbol",
-      type: "array",
-      nonZh: "consecutive"
-    }).join(" ");
   }
 
   // pinyin-captions/content_script.js
@@ -24360,6 +24371,10 @@
       }
     });
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message?.type === "SUBTITLE_CUES" && Array.isArray(message.cues)) {
+        handleSubtitleCues(message.cues, message.language);
+        sendResponse({ ok: true });
+      }
       if (message?.type === "CHINESE_CUES" && Array.isArray(message.cues)) {
         handleChineseCues(message.cues);
         sendResponse({ ok: true });
@@ -24415,6 +24430,8 @@
     }
     video.addEventListener("timeupdate", updateOverlay);
     video.addEventListener("play", updateOverlay);
+    video.addEventListener("pause", updateOverlay);
+    monitorSubtitleChanges();
     updateOverlay();
   }
   async function restoreCachedCues({ activate = false } = {}) {
@@ -24428,6 +24445,13 @@
     const result = await chrome.storage.local.get({ cuesByTab: {} });
     const cached = result.cuesByTab?.[String(STATE.tabId)];
     if (cached?.cues?.length) {
+      let handleSubtitleCues2 = function(cues, language) {
+        applyCues(cues, {
+          restoreLanguage: language === "zh",
+          showLoadedToast: true,
+          language
+        });
+      };
       applyCues(cached.cues, { restoreLanguage: false, showLoadedToast: activate });
     }
   }
@@ -24443,7 +24467,7 @@
       switchBackToOriginalLanguage();
     }
     if (showLoadedToast && !STATE.hasShownLoadedToast) {
-      showToast("\u2713 Pinyin Captions loaded. Switch back to English subtitles.");
+      showToast("\u2713 Pinyin Captions loaded. Switch between subtitle languages to see Pinyin translations.");
       STATE.hasShownLoadedToast = true;
     }
     updateOverlay();
@@ -24460,20 +24484,15 @@
       setOverlayText("");
       return;
     }
-    if (!STATE.cues.length) {
-      updateOverlayFromVisibleSubtitles();
-      return;
-    }
     const currentTime = STATE.video.currentTime + STATE.cueTimeOffset;
-    let activeCue = findActiveCue(currentTime);
-    if (!activeCue) {
+    let activeCue = STATE.cues.length ? findActiveCue(currentTime) : null;
+    if (!activeCue && STATE.cues.length) {
       if (tryAlignCueOffsetFromVisibleSubtitles()) {
         activeCue = findActiveCue(STATE.video.currentTime + STATE.cueTimeOffset);
       }
     }
     if (!activeCue) {
-      STATE.lastCue = null;
-      setOverlayText("");
+      updateOverlayFromVisibleSubtitles();
       return;
     }
     if (STATE.lastCue === activeCue) {
@@ -24484,14 +24503,15 @@
     setOverlayText(convertToPinyin(activeCue.text));
   }
   function updateOverlayFromVisibleSubtitles() {
-    const visibleText = getVisibleChineseSubtitleText();
+    const { text: visibleText, isChinese } = getVisibleSubtitleText();
     if (!visibleText) {
       STATE.usingVisibleSubtitleFallback = false;
       setOverlayText("");
       return;
     }
     STATE.usingVisibleSubtitleFallback = true;
-    setOverlayText(convertToPinyin(visibleText));
+    const pinyin2 = convertToPinyin(visibleText);
+    setOverlayText(pinyin2);
   }
   function createOverlay() {
     if (STATE.overlay) {
@@ -24587,23 +24607,36 @@
     STATE.lastCue = null;
     return true;
   }
-  function getVisibleChineseSubtitleText() {
+  function getVisibleSubtitleText() {
     const selectors = [
       '[class*="player-timedtext"]',
       '[class*="timedtext"]',
       '[class*="subtitle"]',
       '[class*="caption"]',
-      '[data-uia*="subtitle"]'
+      '[data-uia*="subtitle"]',
+      ".vjs-text-track-display",
+      '[role="region"][aria-live]'
     ];
     const candidates = Array.from(document.querySelectorAll(selectors.join(","))).filter((element) => element !== STATE.overlay && element !== STATE.banner).map((element) => ({
       element,
       text: element.textContent || "",
       rect: element.getBoundingClientRect()
-    })).filter(({ text, rect, element }) => {
+    })).filter(({ text: text2, rect, element }) => {
+      if (!text2.trim()) return false;
       const style = getComputedStyle(element);
-      return CHINESE_RE.test(text) && rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0;
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0;
     }).sort((a, b) => b.rect.bottom - a.rect.bottom);
-    return candidates[0]?.text || "";
+    const topCandidate = candidates[0];
+    if (!topCandidate) {
+      return { text: "", isChinese: false };
+    }
+    const text = topCandidate.text;
+    const isChinese = CHINESE_RE.test(text);
+    return { text, isChinese };
+  }
+  function getVisibleChineseSubtitleText() {
+    const { text, isChinese } = getVisibleSubtitleText();
+    return isChinese ? text : "";
   }
   function normalizeComparableChinese(text) {
     return String(text || "").replace(/<[^>]*>/g, "").replace(/[^\u4e00-\u9fff]/g, "").trim();
@@ -24634,7 +24667,7 @@
       zIndex: "100000"
     });
     const message = document.createElement("span");
-    message.textContent = "Pinyin Captions: Please switch to Chinese subtitles for a moment \u2014 we'll switch back automatically.";
+    message.textContent = "Pinyin Captions: Subtitles will automatically appear with Pinyin translations. Works with Chinese, English, and other language subtitles.";
     const dismiss = document.createElement("button");
     dismiss.type = "button";
     dismiss.textContent = "Dismiss";
@@ -24755,5 +24788,35 @@
   }
   function isSupportedHost() {
     return SUPPORTED_HOSTS.some((host) => location.hostname.includes(host));
+  }
+  function monitorSubtitleChanges() {
+    let lastSeenSubtitleText = "";
+    let lastCheckTime = 0;
+    let mutationCount = 0;
+    const checkSubtitleChange = () => {
+      const now = Date.now();
+      if (now - lastCheckTime < 500) return;
+      lastCheckTime = now;
+      const { text: currentText } = getVisibleSubtitleText();
+      if (currentText && currentText !== lastSeenSubtitleText) {
+        lastSeenSubtitleText = currentText;
+        STATE.lastCue = null;
+        updateOverlay();
+      }
+    };
+    const observer = new MutationObserver(() => {
+      mutationCount++;
+      if (mutationCount % 3 === 0) {
+        checkSubtitleChange();
+      }
+    });
+    setTimeout(() => {
+      observer.observe(document.body || document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        characterDataOldValue: false
+      });
+    }, 1e3);
   }
 })();

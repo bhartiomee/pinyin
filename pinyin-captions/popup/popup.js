@@ -25,7 +25,7 @@ async function refresh() {
     : null;
   const result = await chrome.storage.local.get({
     enabled: true,
-    status: 'Waiting for Chinese subtitles...',
+    status: 'Waiting for subtitles...',
     cuesByTab: {},
     subtitleDebugByTab: {}
   });
@@ -50,7 +50,7 @@ async function refresh() {
 
   status.textContent = cueCount > 0
     ? `${cueCount} cues loaded for this tab`
-    : debug ? `${debug.status} - ${debug.host}` : 'Waiting for Chinese subtitles...';
+    : debug ? `${debug.status} - ${debug.host}` : 'Waiting for subtitles...';
 }
 
 function renderState(isEnabled) {

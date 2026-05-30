@@ -81,17 +81,28 @@ async function fetchSubtitle(tabId, url) {
   const cues = parseSubtitle(text, url);
   const sample = cues.slice(0, 12).map(cue => cue.text).join(' ').slice(0, 500);
 
-  if (!cues.length || !CHINESE_RE.test(sample)) {
-    await rememberSubtitleCandidate(tabId, url, `parsed ${cues.length} cues, not Chinese`);
+  if (!cues.length) {
+    await rememberSubtitleCandidate(tabId, url, 'parsed 0 cues');
     return;
   }
 
+  const isChinese = CHINESE_RE.test(sample);
+  
+  // Always cache and send subtitles (both Chinese and English) to content script
+  // The content script will detect the language and use appropriate handling
   await cacheCues(tabId, cues);
-  chrome.tabs.sendMessage(tabId, { type: 'CHINESE_CUES', cues }, () => {
+  
+  chrome.tabs.sendMessage(tabId, { 
+    type: 'SUBTITLE_CUES', 
+    cues,
+    language: isChinese ? 'zh' : 'en'
+  }, () => {
     if (chrome.runtime.lastError) {
       console.debug('Pinyin Captions: content script unavailable', chrome.runtime.lastError.message);
     }
   });
+  
+  await rememberSubtitleCandidate(tabId, url, `sent ${cues.length} ${isChinese ? 'Chinese' : 'English'} cues`);
 }
 
 function parseSubtitle(text, url = '') {
