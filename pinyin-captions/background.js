@@ -77,8 +77,76 @@ async function fetchSubtitle(tabId, url) {
 }
 
 function parseSubtitle(text, url = '') {
+  const looksLikeYouTubeTimedText = /timedtext/i.test(url) || /"events"\s*:\s*\[/i.test(text) || /<text\b[^>]*(start|dur)=/i.test(text);
   const looksLikeTtml = /\.ttml/i.test(url) || /ttml2/i.test(url) || /<tt[\s>]/i.test(text) || /<p\b[^>]*(begin|end)=/i.test(text);
+
+  if (looksLikeYouTubeTimedText) {
+    return parseYouTubeTimedText(text);
+  }
+
   return looksLikeTtml ? parseTTML(text) : parseVTT(text);
+}
+
+function parseYouTubeTimedText(text) {
+  const raw = String(text || '').trim();
+
+  if (!raw) {
+    return [];
+  }
+
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    return parseYouTubeJson3(raw);
+  }
+
+  return parseYouTubeXml(raw);
+}
+
+function parseYouTubeJson3(text) {
+  try {
+    const data = JSON.parse(text);
+    return (data.events || [])
+      .map(event => {
+        const start = Number(event.tStartMs) / 1000;
+        const duration = Number(event.dDurationMs || 0) / 1000;
+        const cueText = cleanSubtitleText((event.segs || []).map(seg => seg.utf8 || '').join(''));
+
+        if (!Number.isFinite(start) || !cueText) {
+          return null;
+        }
+
+        return {
+          start,
+          end: start + (duration || 2.5),
+          text: cueText
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    console.debug('Pinyin Captions: failed to parse YouTube JSON captions', error);
+    return [];
+  }
+}
+
+function parseYouTubeXml(text) {
+  const decoded = decodeHtmlEntities(text);
+  return Array.from(decoded.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/gi))
+    .map(match => {
+      const attrs = match[1] || '';
+      const start = Number(getXmlAttribute(attrs, 'start'));
+      const duration = Number(getXmlAttribute(attrs, 'dur') || 0);
+      const cueText = cleanSubtitleText(match[2] || '');
+
+      if (!Number.isFinite(start) || !cueText) {
+        return null;
+      }
+
+      return {
+        start,
+        end: start + (Number.isFinite(duration) && duration > 0 ? duration : 2.5),
+        text: cueText
+      };
+    })
+    .filter(Boolean);
 }
 
 function parseVTT(text) {
@@ -197,7 +265,7 @@ function timestampToSeconds(value) {
 }
 
 function cleanSubtitleText(input) {
-  return String(input || '')
+  return decodeHtmlEntities(String(input || ''))
     .replace(/<\/?(font|i|b|ruby|rt|rp|span|div|br|p|c|v|lang|em|strong)[^>]*>/gi, ' ')
     .replace(/<[^>]*>/g, ' ')
     .replace(/&nbsp;/gi, ' ')
@@ -206,6 +274,18 @@ function cleanSubtitleText(input) {
     .replace(/&gt;/gi, '>')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function decodeHtmlEntities(input) {
+  return String(input || '')
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'");
 }
 
 async function getEnabled() {
