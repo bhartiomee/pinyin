@@ -178,18 +178,21 @@ function updateOverlay() {
     return;
   }
 
-  // Try using cached cues first
+  const isNetflix = location.hostname.includes('netflix.com');
+  
+  // Try using cached cues first (if we have them from intercepted requests)
   const currentTime = STATE.video.currentTime + STATE.cueTimeOffset;
   let activeCue = STATE.cues.length ? findActiveCue(currentTime) : null;
 
   // If no cached cues or cue not found, try to align using visible subtitles
-  if (!activeCue && STATE.cues.length) {
+  if (!activeCue && STATE.cues.length && !isNetflix) {
     if (tryAlignCueOffsetFromVisibleSubtitles()) {
       activeCue = findActiveCue(STATE.video.currentTime + STATE.cueTimeOffset);
     }
   }
 
   // If still no cue, use fallback from visible subtitles
+  // For Netflix, this is the PRIMARY method since Netflix doesn't expose subtitle files
   if (!activeCue) {
     updateOverlayFromVisibleSubtitles();
     return;
@@ -334,24 +337,47 @@ function tryAlignCueOffsetFromVisibleSubtitles() {
 
 function getVisibleSubtitleText() {
   const selectors = [
+    // Netflix
     '[class*="player-timedtext"]',
     '[class*="timedtext"]',
+    '[class*="player-subtitle"]',
+    'span[role="presentation"][class*="subtitle"]',
+    'div[class*="player-core"]',
+    
+    // General
     '[class*="subtitle"]',
     '[class*="caption"]',
     '[data-uia*="subtitle"]',
     '.vjs-text-track-display',
-    '[role="region"][aria-live]'
+    '[role="region"][aria-live]',
+    
+    // Backup: look for any visible text element that might be subtitles
+    'p[class*="subtitle"]',
+    'span[class*="caption"]'
   ];
   
   const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
-    .filter(element => element !== STATE.overlay && element !== STATE.banner)
+    .filter(element => {
+      // Skip our own overlay and banner
+      if (element === STATE.overlay || element === STATE.banner) return false;
+      
+      const text = element.textContent || '';
+      if (!text.trim()) return false;
+      
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      
+      // For Netflix: usually near bottom of screen
+      const isLikelySubtitle = rect.bottom > window.innerHeight * 0.5; // Lower half of screen
+      return isLikelySubtitle;
+    })
     .map(element => ({
       element,
       text: element.textContent || '',
-      rect: element.getBoundingClientRect()
+      rect: element.getBoundingClientRect(),
+      depth: getElementDepth(element)
     }))
     .filter(({ text, rect, element }) => {
-      if (!text.trim()) return false;
       const style = getComputedStyle(element);
       return rect.width > 0 &&
         rect.height > 0 &&
@@ -359,7 +385,10 @@ function getVisibleSubtitleText() {
         style.display !== 'none' &&
         Number(style.opacity || 1) > 0;
     })
-    .sort((a, b) => b.rect.bottom - a.rect.bottom);
+    .sort((a, b) => {
+      // Prioritize elements closest to bottom of viewport
+      return b.rect.bottom - a.rect.bottom;
+    });
 
   const topCandidate = candidates[0];
   if (!topCandidate) {
@@ -369,6 +398,16 @@ function getVisibleSubtitleText() {
   const text = topCandidate.text;
   const isChinese = CHINESE_RE.test(text);
   return { text, isChinese };
+}
+
+function getElementDepth(el) {
+  let depth = 0;
+  let current = el;
+  while (current && current.parentElement) {
+    depth++;
+    current = current.parentElement;
+  }
+  return depth;
 }
 
 function getVisibleChineseSubtitleText() {
@@ -410,8 +449,11 @@ function showSetupBanner() {
     zIndex: '100000'
   });
 
+  const isNetflix = location.hostname.includes('netflix.com');
   const message = document.createElement('span');
-  message.textContent = "Pinyin Captions: Subtitles will automatically appear with Pinyin translations. Works with Chinese, English, and other language subtitles.";
+  message.textContent = isNetflix 
+    ? "✓ Pinyin Captions ready! Pinyin will appear below any subtitles on Netflix."
+    : "✓ Pinyin Captions ready! Switch to Chinese subtitles to load Pinyin translations.";
 
   const dismiss = document.createElement('button');
   dismiss.type = 'button';
@@ -556,17 +598,20 @@ function isSupportedHost() {
 
 function monitorSubtitleChanges() {
   let lastSeenSubtitleText = '';
-  let lastCheckTime = 0;
-  let mutationCount = 0;
+  let lastUpdateTime = 0;
+  const isNetflix = location.hostname.includes('netflix.com');
+  
+  // For Netflix, check frequently since subtitles can change rapidly
+  const throttleMs = isNetflix ? 100 : 500;
   
   const checkSubtitleChange = () => {
     const now = Date.now();
-    if (now - lastCheckTime < 500) return; // Throttle to 500ms
-    lastCheckTime = now;
+    if (now - lastUpdateTime < throttleMs) return;
+    lastUpdateTime = now;
     
     const { text: currentText } = getVisibleSubtitleText();
     
-    // If subtitle text changed significantly, trigger overlay update
+    // Update if subtitle text changed
     if (currentText && currentText !== lastSeenSubtitleText) {
       lastSeenSubtitleText = currentText;
       STATE.lastCue = null; // Reset to force update
@@ -574,22 +619,28 @@ function monitorSubtitleChanges() {
     }
   };
   
-  // Use MutationObserver to detect subtitle DOM changes
-  // This is critical for Netflix when switching between subtitle languages
-  const observer = new MutationObserver(() => {
-    mutationCount++;
-    if (mutationCount % 3 === 0) { // Throttle observer calls
-      checkSubtitleChange();
-    }
-  });
+  // Monitor video timeupdate events (most reliable for detecting subtitle changes)
+  if (STATE.video) {
+    STATE.video.addEventListener('timeupdate', checkSubtitleChange);
+    STATE.video.addEventListener('pause', checkSubtitleChange);
+    STATE.video.addEventListener('play', checkSubtitleChange);
+  }
+  
+  // Also use MutationObserver as a fallback
+  const observer = new MutationObserver(checkSubtitleChange);
   
   // Start observing after a brief delay to ensure DOM is ready
   setTimeout(() => {
-    observer.observe(document.body || document.documentElement, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      characterDataOldValue: false
-    });
+    try {
+      observer.observe(document.body || document.documentElement, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        characterDataOldValue: false,
+        attributes: false
+      });
+    } catch (e) {
+      console.debug('Could not attach subtitle monitor:', e.message);
+    }
   }, 1000);
 }

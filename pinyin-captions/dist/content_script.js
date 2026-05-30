@@ -24484,9 +24484,10 @@
       setOverlayText("");
       return;
     }
+    const isNetflix = location.hostname.includes("netflix.com");
     const currentTime = STATE.video.currentTime + STATE.cueTimeOffset;
     let activeCue = STATE.cues.length ? findActiveCue(currentTime) : null;
-    if (!activeCue && STATE.cues.length) {
+    if (!activeCue && STATE.cues.length && !isNetflix) {
       if (tryAlignCueOffsetFromVisibleSubtitles()) {
         activeCue = findActiveCue(STATE.video.currentTime + STATE.cueTimeOffset);
       }
@@ -24609,23 +24610,41 @@
   }
   function getVisibleSubtitleText() {
     const selectors = [
+      // Netflix
       '[class*="player-timedtext"]',
       '[class*="timedtext"]',
+      '[class*="player-subtitle"]',
+      'span[role="presentation"][class*="subtitle"]',
+      'div[class*="player-core"]',
+      // General
       '[class*="subtitle"]',
       '[class*="caption"]',
       '[data-uia*="subtitle"]',
       ".vjs-text-track-display",
-      '[role="region"][aria-live]'
+      '[role="region"][aria-live]',
+      // Backup: look for any visible text element that might be subtitles
+      'p[class*="subtitle"]',
+      'span[class*="caption"]'
     ];
-    const candidates = Array.from(document.querySelectorAll(selectors.join(","))).filter((element) => element !== STATE.overlay && element !== STATE.banner).map((element) => ({
+    const candidates = Array.from(document.querySelectorAll(selectors.join(","))).filter((element) => {
+      if (element === STATE.overlay || element === STATE.banner) return false;
+      const text2 = element.textContent || "";
+      if (!text2.trim()) return false;
+      const rect = element.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const isLikelySubtitle = rect.bottom > window.innerHeight * 0.5;
+      return isLikelySubtitle;
+    }).map((element) => ({
       element,
       text: element.textContent || "",
-      rect: element.getBoundingClientRect()
+      rect: element.getBoundingClientRect(),
+      depth: getElementDepth(element)
     })).filter(({ text: text2, rect, element }) => {
-      if (!text2.trim()) return false;
       const style = getComputedStyle(element);
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0;
-    }).sort((a, b) => b.rect.bottom - a.rect.bottom);
+    }).sort((a, b) => {
+      return b.rect.bottom - a.rect.bottom;
+    });
     const topCandidate = candidates[0];
     if (!topCandidate) {
       return { text: "", isChinese: false };
@@ -24633,6 +24652,15 @@
     const text = topCandidate.text;
     const isChinese = CHINESE_RE.test(text);
     return { text, isChinese };
+  }
+  function getElementDepth(el) {
+    let depth = 0;
+    let current = el;
+    while (current && current.parentElement) {
+      depth++;
+      current = current.parentElement;
+    }
+    return depth;
   }
   function getVisibleChineseSubtitleText() {
     const { text, isChinese } = getVisibleSubtitleText();
@@ -24666,8 +24694,9 @@
       boxShadow: "0 8px 28px rgba(0, 0, 0, 0.35)",
       zIndex: "100000"
     });
+    const isNetflix = location.hostname.includes("netflix.com");
     const message = document.createElement("span");
-    message.textContent = "Pinyin Captions: Subtitles will automatically appear with Pinyin translations. Works with Chinese, English, and other language subtitles.";
+    message.textContent = isNetflix ? "\u2713 Pinyin Captions ready! Pinyin will appear below any subtitles on Netflix." : "\u2713 Pinyin Captions ready! Switch to Chinese subtitles to load Pinyin translations.";
     const dismiss = document.createElement("button");
     dismiss.type = "button";
     dismiss.textContent = "Dismiss";
@@ -24791,12 +24820,13 @@
   }
   function monitorSubtitleChanges() {
     let lastSeenSubtitleText = "";
-    let lastCheckTime = 0;
-    let mutationCount = 0;
+    let lastUpdateTime = 0;
+    const isNetflix = location.hostname.includes("netflix.com");
+    const throttleMs = isNetflix ? 100 : 500;
     const checkSubtitleChange = () => {
       const now = Date.now();
-      if (now - lastCheckTime < 500) return;
-      lastCheckTime = now;
+      if (now - lastUpdateTime < throttleMs) return;
+      lastUpdateTime = now;
       const { text: currentText } = getVisibleSubtitleText();
       if (currentText && currentText !== lastSeenSubtitleText) {
         lastSeenSubtitleText = currentText;
@@ -24804,19 +24834,24 @@
         updateOverlay();
       }
     };
-    const observer = new MutationObserver(() => {
-      mutationCount++;
-      if (mutationCount % 3 === 0) {
-        checkSubtitleChange();
-      }
-    });
+    if (STATE.video) {
+      STATE.video.addEventListener("timeupdate", checkSubtitleChange);
+      STATE.video.addEventListener("pause", checkSubtitleChange);
+      STATE.video.addEventListener("play", checkSubtitleChange);
+    }
+    const observer = new MutationObserver(checkSubtitleChange);
     setTimeout(() => {
-      observer.observe(document.body || document.documentElement, {
-        childList: true,
-        subtree: true,
-        characterData: true,
-        characterDataOldValue: false
-      });
+      try {
+        observer.observe(document.body || document.documentElement, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          characterDataOldValue: false,
+          attributes: false
+        });
+      } catch (e) {
+        console.debug("Could not attach subtitle monitor:", e.message);
+      }
     }, 1e3);
   }
 })();

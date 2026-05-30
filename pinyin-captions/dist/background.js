@@ -1,14 +1,11 @@
 (() => {
   // pinyin-captions/background.js
   var SUBTITLE_URL_RE = /(\.vtt(?:\?|$)|\.ttml(?:\?|$)|\.dfxp(?:\?|$)|\.xml(?:\?|$)|ttml2|webvtt|dfxp|subtitle|caption|timedtext|texttrack|text_track)/i;
-  var NETFLIX_RANGE_RE = /^https:\/\/[^/]+\.nflxvideo\.net\/range\/(\d+)-(\d+)/i;
   var CHINESE_RE = /[\u4e00-\u9fff]/;
   var FETCHED_URLS = /* @__PURE__ */ new Map();
   var CACHE_TTL_MS = 2 * 60 * 1e3;
-  var MAX_NETFLIX_RANGE_BYTES = 750 * 1024;
   var REQUEST_URLS = [
     "*://*.netflix.com/*",
-    "*://*.nflxvideo.net/*",
     "*://*.youtube.com/*",
     "*://*.primevideo.com/*",
     "*://*.disneyplus.com/*",
@@ -17,7 +14,7 @@
   chrome.runtime.onInstalled.addListener(() => {
     chrome.storage.local.set({
       enabled: true,
-      status: "Waiting for Chinese subtitles...",
+      status: "Waiting for subtitles...",
       cuesByTab: {}
     });
   });
@@ -49,10 +46,6 @@
     if (!enabled) {
       return;
     }
-    if (isOversizedNetflixRange(url)) {
-      await rememberSubtitleCandidate(tabId, url, "skipped large Netflix range");
-      return;
-    }
     const response = await fetch(url, {
       credentials: "include",
       cache: "force-cache"
@@ -64,16 +57,16 @@
     const buffer = await response.arrayBuffer();
     const text = new TextDecoder("utf-8", { fatal: false }).decode(buffer);
     if (!looksLikeTextSubtitlePayload(text)) {
-      await rememberSubtitleCandidate(tabId, url, "fetched range, not text subtitle");
+      await rememberSubtitleCandidate(tabId, url, "not a text subtitle");
       return;
     }
     const cues = parseSubtitle(text, url);
-    const sample = cues.slice(0, 12).map((cue) => cue.text).join(" ").slice(0, 500);
     if (!cues.length) {
       await rememberSubtitleCandidate(tabId, url, "parsed 0 cues");
       return;
     }
-    const isChinese = CHINESE_RE.test(sample);
+    const sample2 = cues.slice(0, 12).map((cue) => cue.text).join(" ").slice(0, 500);
+    const isChinese = CHINESE_RE.test(sample2);
     await cacheCues(tabId, cues);
     chrome.tabs.sendMessage(tabId, {
       type: "SUBTITLE_CUES",
@@ -101,25 +94,6 @@
     const match = url.match(NETFLIX_RANGE_RE);
     if (!match) {
       return false;
-    }
-    const start = Number(match[1]);
-    const end = Number(match[2]);
-    const bytes = end - start + 1;
-    return Number.isFinite(bytes) && bytes > 0 && bytes <= MAX_NETFLIX_RANGE_BYTES;
-  }
-  function isOversizedNetflixRange(url) {
-    const match = url.match(NETFLIX_RANGE_RE);
-    if (!match) {
-      return false;
-    }
-    const start = Number(match[1]);
-    const end = Number(match[2]);
-    return end - start + 1 > MAX_NETFLIX_RANGE_BYTES;
-  }
-  function looksLikeTextSubtitlePayload(text) {
-    const sample = String(text || "").slice(0, 1200);
-    if (/<(tt|p|text|span|body|div)\b/i.test(sample) || /WEBVTT/i.test(sample) || /-->/i.test(sample) || CHINESE_RE.test(sample)) {
-      return true;
     }
     const printable = sample.replace(/[\t\n\r -~\u0080-\uffff]/g, "").length;
     return sample.length > 0 && printable / sample.length < 0.05;
