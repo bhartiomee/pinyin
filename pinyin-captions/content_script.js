@@ -1,17 +1,20 @@
 import { convertToPinyin } from './pinyin_converter.js';
 
 const SUPPORTED_HOSTS = ['netflix.com', 'youtube.com', 'primevideo.com', 'disneyplus.com', 'hotstar.com'];
+const CHINESE_RE = /[\u4e00-\u9fff]/;
 const STATE = {
   enabled: true,
   video: null,
   cues: [],
+  usingVisibleSubtitleFallback: false,
   tabId: null,
   cueTimeOffset: 0,
   originalLanguage: null,
   lastCue: null,
   banner: null,
   overlay: null,
-  hasShownLoadedToast: false
+  hasShownLoadedToast: false,
+  lastAlignmentAttempt: 0
 };
 
 init();
@@ -35,6 +38,22 @@ async function init() {
     if (message?.type === 'CHINESE_CUES' && Array.isArray(message.cues)) {
       handleChineseCues(message.cues);
       sendResponse({ ok: true });
+    }
+
+    if (message?.type === 'GET_PAGE_STATUS') {
+      const currentTime = STATE.video ? STATE.video.currentTime + STATE.cueTimeOffset : 0;
+      const activeCue = STATE.cues.length ? findActiveCue(currentTime) : null;
+      sendResponse({
+        ok: true,
+        enabled: STATE.enabled,
+        hasVideo: Boolean(STATE.video),
+        cueCount: STATE.cues.length,
+        usingVisibleSubtitleFallback: STATE.usingVisibleSubtitleFallback,
+        videoTime: STATE.video?.currentTime ?? null,
+        cueTimeOffset: STATE.cueTimeOffset,
+        matchedCue: Boolean(activeCue),
+        sampleCue: activeCue?.text || STATE.cues[0]?.text || ''
+      });
     }
     return true;
   });
@@ -134,13 +153,24 @@ function normalizeCues(cues) {
 }
 
 function updateOverlay() {
-  if (!STATE.enabled || !STATE.video || !STATE.cues.length) {
+  if (!STATE.enabled || !STATE.video) {
     setOverlayText('');
     return;
   }
 
+  if (!STATE.cues.length) {
+    updateOverlayFromVisibleSubtitles();
+    return;
+  }
+
   const currentTime = STATE.video.currentTime + STATE.cueTimeOffset;
-  const activeCue = findActiveCue(currentTime);
+  let activeCue = findActiveCue(currentTime);
+
+  if (!activeCue) {
+    if (tryAlignCueOffsetFromVisibleSubtitles()) {
+      activeCue = findActiveCue(STATE.video.currentTime + STATE.cueTimeOffset);
+    }
+  }
 
   if (!activeCue) {
     STATE.lastCue = null;
@@ -153,7 +183,21 @@ function updateOverlay() {
   }
 
   STATE.lastCue = activeCue;
+  STATE.usingVisibleSubtitleFallback = false;
   setOverlayText(convertToPinyin(activeCue.text));
+}
+
+function updateOverlayFromVisibleSubtitles() {
+  const visibleText = getVisibleChineseSubtitleText();
+
+  if (!visibleText) {
+    STATE.usingVisibleSubtitleFallback = false;
+    setOverlayText('');
+    return;
+  }
+
+  STATE.usingVisibleSubtitleFallback = true;
+  setOverlayText(convertToPinyin(visibleText));
 }
 
 function createOverlay() {
@@ -238,6 +282,72 @@ function inferCueTimeOffset() {
   }
 
   return 0;
+}
+
+function tryAlignCueOffsetFromVisibleSubtitles() {
+  if (!STATE.video || !STATE.cues.length || !location.hostname.includes('netflix.com')) {
+    return false;
+  }
+
+  const now = Date.now();
+  if (now - STATE.lastAlignmentAttempt < 800) {
+    return false;
+  }
+  STATE.lastAlignmentAttempt = now;
+
+  const visibleText = normalizeComparableChinese(getVisibleChineseSubtitleText());
+  if (!visibleText) {
+    return false;
+  }
+
+  const matchingCue = STATE.cues.find(cue => {
+    const cueText = normalizeComparableChinese(cue.text);
+    return cueText && (cueText.includes(visibleText) || visibleText.includes(cueText));
+  });
+
+  if (!matchingCue) {
+    return false;
+  }
+
+  STATE.cueTimeOffset = matchingCue.start - STATE.video.currentTime;
+  STATE.lastCue = null;
+  return true;
+}
+
+function getVisibleChineseSubtitleText() {
+  const selectors = [
+    '[class*="player-timedtext"]',
+    '[class*="timedtext"]',
+    '[class*="subtitle"]',
+    '[class*="caption"]',
+    '[data-uia*="subtitle"]'
+  ];
+  const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
+    .filter(element => element !== STATE.overlay && element !== STATE.banner)
+    .map(element => ({
+      element,
+      text: element.textContent || '',
+      rect: element.getBoundingClientRect()
+    }))
+    .filter(({ text, rect, element }) => {
+      const style = getComputedStyle(element);
+      return CHINESE_RE.test(text) &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        style.visibility !== 'hidden' &&
+        style.display !== 'none' &&
+        Number(style.opacity || 1) > 0;
+    })
+    .sort((a, b) => b.rect.bottom - a.rect.bottom);
+
+  return candidates[0]?.text || '';
+}
+
+function normalizeComparableChinese(text) {
+  return String(text || '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/[^\u4e00-\u9fff]/g, '')
+    .trim();
 }
 
 function showSetupBanner() {
