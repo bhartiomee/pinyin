@@ -1,0 +1,28 @@
+{
+  "name": "pinyin-captions-extension",
+  "version": "1.0.0",
+  "description": "Chrome extension that overlays offline Pinyin captions for Chinese subtitle tracks.",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "build": "node pinyin-captions/build.js",
+    "dev": "node main.js",
+    "start": "node main.js"
+  },
+  "keywords": [
+    "chrome-extension",
+    "pinyin",
+    "chinese",
+    "captions",
+    "subtitles"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "pinyin-pro": "^3.26.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "pngjs": "^7.0.0"
+  }
+}

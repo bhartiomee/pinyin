@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Pinyin Captions",
+  "version": "1.0.0",
+  "description": "Overlay real-time Pinyin subtitles below native captions on supported streaming platforms.",
+  "permissions": [
+    "storage",
+    "scripting",
+    "tabs",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "*://*.netflix.com/*",
+    "*://*.youtube.com/*",
+    "*://*.primevideo.com/*",
+    "*://*.disneyplus.com/*",
+    "*://*.hotstar.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.netflix.com/*",
+        "*://*.youtube.com/*",
+        "*://*.primevideo.com/*",
+        "*://*.disneyplus.com/*",
+        "*://*.hotstar.com/*"
+      ],
+      "js": [
+        "content_script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Pinyin Captions",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  }
+}

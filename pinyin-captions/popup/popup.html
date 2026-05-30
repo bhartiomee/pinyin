@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Pinyin Captions</title>
+    <style>
+      body {
+        width: 260px;
+        margin: 0;
+        padding: 16px;
+        font-family: Arial, sans-serif;
+        color: #161616;
+        background: #ffffff;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 16px;
+        line-height: 1.3;
+      }
+
+      label {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        user-select: none;
+      }
+
+      input {
+        width: 18px;
+        height: 18px;
+      }
+
+      #stateText {
+        font-weight: 700;
+      }
+
+      #status {
+        margin: 14px 0 0;
+        color: #555;
+        font-size: 13px;
+        line-height: 1.35;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="row">
+      <h1>Pinyin Captions</h1>
+      <label>
+        <input id="enabled" type="checkbox">
+        <span id="stateText">ON</span>
+      </label>
+    </div>
+    <p id="status">Waiting for Chinese subtitles...</p>
+    <script src="popup.js"></script>
+  </body>
+</html>
