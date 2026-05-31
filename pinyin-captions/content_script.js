@@ -337,23 +337,23 @@ function tryAlignCueOffsetFromVisibleSubtitles() {
 
 function getVisibleSubtitleText() {
   const selectors = [
-    // Netflix
+    // Netflix specific
     '[class*="player-timedtext"]',
     '[class*="timedtext"]',
-    '[class*="player-subtitle"]',
     'span[role="presentation"][class*="subtitle"]',
-    'div[class*="player-core"]',
     
-    // General
-    '[class*="subtitle"]',
-    '[class*="caption"]',
-    '[data-uia*="subtitle"]',
-    '.vjs-text-track-display',
-    '[role="region"][aria-live]',
+    // YouTube specific
+    '.ytp-caption-segment',
+    '[aria-label*="Caption"]',
+    'span[class*="caption"]',
     
-    // Backup: look for any visible text element that might be subtitles
-    'p[class*="subtitle"]',
-    'span[class*="caption"]'
+    // General subtitle containers
+    '[class*="subtitle-container"]',
+    '[role="region"][aria-label*="subtitle"]',
+    '.vjs-text-track-display span',
+    
+    // Generic (but more careful)
+    'p[class*="subtitle"]'
   ];
   
   const candidates = Array.from(document.querySelectorAll(selectors.join(',')))
@@ -362,52 +362,58 @@ function getVisibleSubtitleText() {
       if (element === STATE.overlay || element === STATE.banner) return false;
       
       const text = element.textContent || '';
-      if (!text.trim()) return false;
+      if (!text.trim() || text.length > 300) return false; // Subtitles are usually short
       
       const rect = element.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
       
-      // For Netflix: usually near bottom of screen
-      const isLikelySubtitle = rect.bottom > window.innerHeight * 0.5; // Lower half of screen
+      // Must be visible on screen
+      if (rect.bottom < 0 || rect.top > window.innerHeight) return false;
+      
+      // Subtitles appear in lower half of video player, not above
+      // For video players: usually in bottom 25% of viewport
+      const isLikelySubtitle = rect.bottom > window.innerHeight * 0.65;
+      
       return isLikelySubtitle;
     })
     .map(element => ({
       element,
       text: element.textContent || '',
-      rect: element.getBoundingClientRect(),
-      depth: getElementDepth(element)
+      rect: element.getBoundingClientRect()
     }))
     .filter(({ text, rect, element }) => {
       const style = getComputedStyle(element);
+      const parent = element.parentElement;
+      const parentStyle = parent ? getComputedStyle(parent) : null;
+      
       return rect.width > 0 &&
         rect.height > 0 &&
         style.visibility !== 'hidden' &&
         style.display !== 'none' &&
-        Number(style.opacity || 1) > 0;
+        Number(style.opacity || 1) > 0 &&
+        (!parentStyle || parentStyle.visibility !== 'hidden') &&
+        (!parentStyle || Number(parentStyle.opacity || 1) > 0);
     })
     .sort((a, b) => {
       // Prioritize elements closest to bottom of viewport
       return b.rect.bottom - a.rect.bottom;
     });
 
+  // Take only the first candidate (most likely the actual subtitle)
   const topCandidate = candidates[0];
   if (!topCandidate) {
     return { text: '', isChinese: false };
   }
   
   const text = topCandidate.text;
+  
+  // Sanity check: if text is extremely long, it's probably not a subtitle
+  if (text.length > 300) {
+    return { text: '', isChinese: false };
+  }
+  
   const isChinese = CHINESE_RE.test(text);
   return { text, isChinese };
-}
-
-function getElementDepth(el) {
-  let depth = 0;
-  let current = el;
-  while (current && current.parentElement) {
-    depth++;
-    current = current.parentElement;
-  }
-  return depth;
 }
 
 function getVisibleChineseSubtitleText() {

@@ -24610,38 +24610,39 @@
   }
   function getVisibleSubtitleText() {
     const selectors = [
-      // Netflix
+      // Netflix specific
       '[class*="player-timedtext"]',
       '[class*="timedtext"]',
-      '[class*="player-subtitle"]',
       'span[role="presentation"][class*="subtitle"]',
-      'div[class*="player-core"]',
-      // General
-      '[class*="subtitle"]',
-      '[class*="caption"]',
-      '[data-uia*="subtitle"]',
-      ".vjs-text-track-display",
-      '[role="region"][aria-live]',
-      // Backup: look for any visible text element that might be subtitles
-      'p[class*="subtitle"]',
-      'span[class*="caption"]'
+      // YouTube specific
+      ".ytp-caption-segment",
+      '[aria-label*="Caption"]',
+      'span[class*="caption"]',
+      // General subtitle containers
+      '[class*="subtitle-container"]',
+      '[role="region"][aria-label*="subtitle"]',
+      ".vjs-text-track-display span",
+      // Generic (but more careful)
+      'p[class*="subtitle"]'
     ];
     const candidates = Array.from(document.querySelectorAll(selectors.join(","))).filter((element) => {
       if (element === STATE.overlay || element === STATE.banner) return false;
       const text2 = element.textContent || "";
-      if (!text2.trim()) return false;
+      if (!text2.trim() || text2.length > 300) return false;
       const rect = element.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
-      const isLikelySubtitle = rect.bottom > window.innerHeight * 0.5;
+      if (rect.bottom < 0 || rect.top > window.innerHeight) return false;
+      const isLikelySubtitle = rect.bottom > window.innerHeight * 0.65;
       return isLikelySubtitle;
     }).map((element) => ({
       element,
       text: element.textContent || "",
-      rect: element.getBoundingClientRect(),
-      depth: getElementDepth(element)
+      rect: element.getBoundingClientRect()
     })).filter(({ text: text2, rect, element }) => {
       const style = getComputedStyle(element);
-      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0;
+      const parent = element.parentElement;
+      const parentStyle = parent ? getComputedStyle(parent) : null;
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0 && (!parentStyle || parentStyle.visibility !== "hidden") && (!parentStyle || Number(parentStyle.opacity || 1) > 0);
     }).sort((a, b) => {
       return b.rect.bottom - a.rect.bottom;
     });
@@ -24650,17 +24651,11 @@
       return { text: "", isChinese: false };
     }
     const text = topCandidate.text;
+    if (text.length > 300) {
+      return { text: "", isChinese: false };
+    }
     const isChinese = CHINESE_RE.test(text);
     return { text, isChinese };
-  }
-  function getElementDepth(el) {
-    let depth = 0;
-    let current = el;
-    while (current && current.parentElement) {
-      depth++;
-      current = current.parentElement;
-    }
-    return depth;
   }
   function getVisibleChineseSubtitleText() {
     const { text, isChinese } = getVisibleSubtitleText();

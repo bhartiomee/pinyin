@@ -65,8 +65,8 @@
       await rememberSubtitleCandidate(tabId, url, "parsed 0 cues");
       return;
     }
-    const sample2 = cues.slice(0, 12).map((cue) => cue.text).join(" ").slice(0, 500);
-    const isChinese = CHINESE_RE.test(sample2);
+    const sample = cues.slice(0, 12).map((cue) => cue.text).join(" ").slice(0, 500);
+    const isChinese = CHINESE_RE.test(sample);
     await cacheCues(tabId, cues);
     chrome.tabs.sendMessage(tabId, {
       type: "SUBTITLE_CUES",
@@ -88,15 +88,7 @@
     return looksLikeTtml ? parseTTML(text) : parseVTT(text);
   }
   function isSubtitleCandidateUrl(url) {
-    return SUBTITLE_URL_RE.test(url) || isLikelyNetflixSubtitleRange(url);
-  }
-  function isLikelyNetflixSubtitleRange(url) {
-    const match = url.match(NETFLIX_RANGE_RE);
-    if (!match) {
-      return false;
-    }
-    const printable = sample.replace(/[\t\n\r -~\u0080-\uffff]/g, "").length;
-    return sample.length > 0 && printable / sample.length < 0.05;
+    return SUBTITLE_URL_RE.test(url);
   }
   function parseYouTubeTimedText(text) {
     const raw = String(text || "").trim();
