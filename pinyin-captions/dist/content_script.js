@@ -24311,7 +24311,7 @@
     traditional: false
   };
 
-  // pinyin-captions/pinyin_converter.js
+  // pinyin-captions/src/pinyin_converter.js
   var HTML_TAG_RE = /<\/?(font|i|b|ruby|rt|rp|span|div|br|p|c|v|lang|em|strong)[^>]*>/gi;
   var ANY_TAG_RE = /<[^>]*>/g;
   var CHINESE_CHARS_RE = /[\u4e00-\u9fff]/g;
@@ -24340,7 +24340,7 @@
     }
   }
 
-  // pinyin-captions/content_script.js
+  // pinyin-captions/src/content_script.js
   var SUPPORTED_HOSTS = ["netflix.com", "youtube.com", "primevideo.com", "disneyplus.com", "hotstar.com"];
   var CHINESE_RE = /[\u4e00-\u9fff]/;
   var STATE = {
@@ -24399,6 +24399,14 @@
     await restoreCachedCues();
     waitForVideo();
     document.addEventListener("fullscreenchange", ensureOverlayParent);
+    if (location.hostname.includes("youtube.com")) {
+      setTimeout(loadYouTubeChineseCaptionTrack, 1500);
+      setInterval(() => {
+        if (!STATE.cues.length) {
+          loadYouTubeChineseCaptionTrack();
+        }
+      }, 5e3);
+    }
   }
   function waitForVideo() {
     const existingVideo = document.querySelector("video");
@@ -24445,21 +24453,122 @@
     const result = await chrome.storage.local.get({ cuesByTab: {} });
     const cached = result.cuesByTab?.[String(STATE.tabId)];
     if (cached?.cues?.length) {
-      let handleSubtitleCues2 = function(cues, language) {
-        applyCues(cues, {
-          restoreLanguage: language === "zh",
-          showLoadedToast: true,
-          language
-        });
-      };
-      applyCues(cached.cues, { restoreLanguage: false, showLoadedToast: activate });
+      applyCues(cached.cues, {
+        restoreLanguage: false,
+        showLoadedToast: activate,
+        language: cached.language || "zh"
+      });
     }
   }
-  function handleChineseCues(cues) {
-    applyCues(cues, { restoreLanguage: true, showLoadedToast: true });
+  function handleSubtitleCues(cues, language) {
+    if (language !== "zh" && STATE.cues.length) {
+      return;
+    }
+    applyCues(cues, {
+      restoreLanguage: language === "zh",
+      showLoadedToast: true,
+      language
+    });
   }
-  function applyCues(cues, { restoreLanguage = false, showLoadedToast = false } = {}) {
-    STATE.cues = normalizeCues(cues);
+  async function loadYouTubeChineseCaptionTrack() {
+    if (!location.hostname.includes("youtube.com") || STATE.cues.length) {
+      return;
+    }
+    const trackUrl = findYouTubeChineseCaptionUrl();
+    if (!trackUrl) {
+      return;
+    }
+    await chrome.runtime.sendMessage({
+      type: "FETCH_SUBTITLE_URL",
+      url: trackUrl
+    }).catch(() => null);
+  }
+  function findYouTubeChineseCaptionUrl() {
+    const playerResponse = getYouTubePlayerResponse();
+    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+    const chineseTrack = tracks.find((track) => isChineseCaptionTrack(track));
+    if (!chineseTrack?.baseUrl) {
+      return "";
+    }
+    const url = new URL(chineseTrack.baseUrl);
+    url.searchParams.set("fmt", "json3");
+    return url.toString();
+  }
+  function getYouTubePlayerResponse() {
+    const scripts = Array.from(document.scripts);
+    for (const script of scripts) {
+      const text = script.textContent || "";
+      const marker = "ytInitialPlayerResponse";
+      const markerIndex = text.indexOf(marker);
+      if (markerIndex === -1) {
+        continue;
+      }
+      const start = text.indexOf("{", markerIndex);
+      if (start === -1) {
+        continue;
+      }
+      const jsonText = extractBalancedJson(text, start);
+      if (!jsonText) {
+        continue;
+      }
+      try {
+        return JSON.parse(jsonText);
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+  function extractBalancedJson(text, start) {
+    let depth = 0;
+    let inString = false;
+    let quote = "";
+    let escaped = false;
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === "\\") {
+          escaped = true;
+        } else if (char === quote) {
+          inString = false;
+        }
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        inString = true;
+        quote = char;
+      } else if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0) {
+          return text.slice(start, index + 1);
+        }
+      }
+    }
+    return "";
+  }
+  function isChineseCaptionTrack(track) {
+    const languageCode = String(track.languageCode || "").toLowerCase();
+    const name = track.name?.simpleText || (track.name?.runs || []).map((run) => run.text).join(" ") || "";
+    const label = `${languageCode} ${name}`.toLowerCase();
+    return /^zh\b/.test(languageCode) || /chinese|中文|普通话|繁體|简体|mandarin/.test(label);
+  }
+  function handleChineseCues(cues) {
+    applyCues(cues, { restoreLanguage: true, showLoadedToast: true, language: "zh" });
+  }
+  function applyCues(cues, { restoreLanguage = false, showLoadedToast = false, language = "zh" } = {}) {
+    if (language !== "zh" && STATE.cues.length) {
+      return;
+    }
+    const normalizedCues = normalizeCues(cues);
+    const sampleText = normalizedCues.slice(0, 20).map((cue) => cue.text).join(" ");
+    if (!CHINESE_RE.test(sampleText)) {
+      return;
+    }
+    STATE.cues = normalizedCues;
     STATE.cueTimeOffset = inferCueTimeOffset();
     STATE.lastCue = null;
     hideSetupBanner();
@@ -24485,6 +24594,7 @@
       return;
     }
     const isNetflix = location.hostname.includes("netflix.com");
+    const isYouTube = location.hostname.includes("youtube.com");
     const currentTime = STATE.video.currentTime + STATE.cueTimeOffset;
     let activeCue = STATE.cues.length ? findActiveCue(currentTime) : null;
     if (!activeCue && STATE.cues.length && !isNetflix) {
@@ -24493,7 +24603,12 @@
       }
     }
     if (!activeCue) {
-      updateOverlayFromVisibleSubtitles();
+      if (!STATE.cues.length) {
+        updateOverlayFromVisibleSubtitles();
+      } else {
+        STATE.lastCue = null;
+        setOverlayText("");
+      }
       return;
     }
     if (STATE.lastCue === activeCue) {
@@ -24511,8 +24626,12 @@
       return;
     }
     STATE.usingVisibleSubtitleFallback = true;
-    const pinyin2 = convertToPinyin(visibleText);
-    setOverlayText(pinyin2);
+    if (isChinese) {
+      const pinyin2 = convertToPinyin(visibleText);
+      setOverlayText(pinyin2);
+    } else {
+      setOverlayText("");
+    }
   }
   function createOverlay() {
     if (STATE.overlay) {
@@ -24609,26 +24728,37 @@
     return true;
   }
   function getVisibleSubtitleText() {
+    let text = "";
+    let isChinese = false;
+    const youtubeCaption = document.querySelector('.ytp-caption-segment, .ytp-caption-window, [aria-label*="Caption"]');
+    if (youtubeCaption) {
+      const captionText = youtubeCaption.textContent?.trim() || "";
+      if (captionText && captionText.length < 300 && captionText.length > 2) {
+        text = captionText;
+        isChinese = CHINESE_RE.test(text);
+        return { text, isChinese };
+      }
+    }
+    const netflixSubtitle = document.querySelector('[class*="player-timedtext"], [class*="timedtext-container"]');
+    if (netflixSubtitle) {
+      const subText = netflixSubtitle.textContent?.trim() || "";
+      if (subText && subText.length < 300 && subText.length > 2) {
+        text = subText;
+        isChinese = CHINESE_RE.test(text);
+        return { text, isChinese };
+      }
+    }
     const selectors = [
-      // Netflix specific
-      '[class*="player-timedtext"]',
-      '[class*="timedtext"]',
-      'span[role="presentation"][class*="subtitle"]',
-      // YouTube specific
-      ".ytp-caption-segment",
-      '[aria-label*="Caption"]',
-      'span[class*="caption"]',
-      // General subtitle containers
-      '[class*="subtitle-container"]',
       '[role="region"][aria-label*="subtitle"]',
+      '[role="region"][aria-label*="caption"]',
       ".vjs-text-track-display span",
-      // Generic (but more careful)
-      'p[class*="subtitle"]'
+      'p[class*="subtitle"]',
+      'span[class*="subtitle"]'
     ];
     const candidates = Array.from(document.querySelectorAll(selectors.join(","))).filter((element) => {
       if (element === STATE.overlay || element === STATE.banner) return false;
-      const text2 = element.textContent || "";
-      if (!text2.trim() || text2.length > 300) return false;
+      const text2 = element.textContent?.trim() || "";
+      if (!text2 || text2.length > 300 || text2.length < 2) return false;
       const rect = element.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return false;
       if (rect.bottom < 0 || rect.top > window.innerHeight) return false;
@@ -24636,26 +24766,20 @@
       return isLikelySubtitle;
     }).map((element) => ({
       element,
-      text: element.textContent || "",
+      text: element.textContent?.trim() || "",
       rect: element.getBoundingClientRect()
     })).filter(({ text: text2, rect, element }) => {
       const style = getComputedStyle(element);
       const parent = element.parentElement;
       const parentStyle = parent ? getComputedStyle(parent) : null;
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) > 0 && (!parentStyle || parentStyle.visibility !== "hidden") && (!parentStyle || Number(parentStyle.opacity || 1) > 0);
-    }).sort((a, b) => {
-      return b.rect.bottom - a.rect.bottom;
-    });
-    const topCandidate = candidates[0];
-    if (!topCandidate) {
-      return { text: "", isChinese: false };
+    }).sort((a, b) => b.rect.bottom - a.rect.bottom);
+    if (candidates[0]) {
+      text = candidates[0].text;
+      isChinese = CHINESE_RE.test(text);
+      return { text, isChinese };
     }
-    const text = topCandidate.text;
-    if (text.length > 300) {
-      return { text: "", isChinese: false };
-    }
-    const isChinese = CHINESE_RE.test(text);
-    return { text, isChinese };
+    return { text: "", isChinese: false };
   }
   function getVisibleChineseSubtitleText() {
     const { text, isChinese } = getVisibleSubtitleText();

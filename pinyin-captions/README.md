@@ -1,50 +1,76 @@
 # Pinyin Captions
 
-Pinyin Captions is a Chrome Extension (Manifest V3) that overlays offline Pinyin subtitles below the native captions on supported streaming sites. It uses `pinyin-pro` locally in the extension bundle, so no paid APIs or remote conversion services are needed.
+A Chrome extension (Manifest V3) that overlays real-time Pinyin subtitles below the platform's native subtitles on Netflix, YouTube, Amazon Prime Video, and Disney+. Pinyin conversion is fully offline using [pinyin-pro](https://github.com/zh-lx/pinyin-pro) — no paid APIs required.
 
-## Supported Platforms
+## How it works
 
-- Netflix
-- YouTube
-- Amazon Prime Video
-- Disney+
-- Hotstar
+1. Watch with **English subtitles** enabled.
+2. A **one-time banner** appears asking you to switch to Chinese subtitles.
+3. `background.js` **intercepts the Chinese `.vtt` / `.ttml` network request**, parses the cues, and sends them to the content script.
+4. The content script **switches the player back to English** automatically.
+5. From then on a **Pinyin overlay** appears below your English subs, synced to `video.currentTime`.
 
-## Install For Development
+## Supported platforms
 
-1. Install dependencies:
+| Platform | Subtitle format intercepted |
+|---|---|
+| Netflix | TTML range requests via `nflxvideo.net` |
+| YouTube | `timedtext` JSON3 / XML |
+| Amazon Prime Video | VTT / TTML |
+| Disney+ / Hotstar | VTT / TTML |
 
-   ```sh
-   npm install
-   ```
+## Install (developer / unpacked)
 
-2. Build the extension:
+### 1. Build
 
-   ```sh
-   npm run build
-   ```
+```bash
+cd pinyin-captions
+npm install
+npm run build
+```
 
-3. Open Chrome and go to `chrome://extensions`.
-4. Enable **Developer mode**.
-5. Click **Load unpacked**.
-6. Select the `dist/` folder inside this project.
+The compiled extension is output to `dist/`.
 
-## How To Use
+### 2. Load in Chrome
 
-1. Open supported Chinese-language content with English subtitles active.
-2. When the banner appears, switch the player subtitles to Chinese for a moment.
-3. Pinyin Captions watches subtitle network requests and loads the Chinese `.vtt` or `.ttml` cue file.
-4. Once cues are loaded, the banner hides automatically and the extension attempts to restore the original subtitle language.
-5. Keep watching. Pinyin appears centered below the native subtitle area.
+1. Open `chrome://extensions`
+2. Enable **Developer mode** (top-right toggle)
+3. Click **Load unpacked** and select the `dist/` folder
 
-If no Chinese subtitle request is intercepted, the banner stays visible and the page continues normally.
+## Usage
 
-## Popup
+1. Open a supported streaming platform and start a show/movie.
+2. Enable **Chinese (Simplified / Traditional)** subtitles when prompted by the banner.
+3. The extension automatically detects the Chinese subtitle file, converts it to Pinyin, then switches your display back to English.
+4. Pinyin text appears centered below the English subtitle line.
+5. Use the extension **popup** (click the toolbar icon) to toggle Pinyin Captions on/off and see how many cues are loaded for the current tab.
 
-The popup lets you turn Pinyin Captions on or off and shows whether cues are loaded for the active tab. Cue metadata is stored in `chrome.storage.local` so the popup can be refreshed without losing status.
+## Project structure
+
+```
+pinyin-captions/
+├── src/
+│   ├── content_script.js   # MutationObserver, overlay, banner, cue sync
+│   └── pinyin_converter.js # Wraps pinyin-pro, exports convertToPinyin()
+├── background.js           # Service worker: intercepts subtitles, parses, caches
+├── popup/
+│   ├── popup.html
+│   └── popup.js
+├── manifest.json           # MV3
+├── build.js                # esbuild: bundles src/ + background.js → dist/
+└── package.json
+```
+
+## Development
+
+```bash
+npm run build   # full rebuild into dist/
+```
+
+Re-load the unpacked extension in `chrome://extensions` after each build.
 
 ## Notes
 
 - Subtitle player controls differ across streaming platforms, so automatic language restoration is best-effort.
-- YouTube does not always expose caption tracks as standard `<track>` elements. In those cases, the extension keeps captions enabled and shows a toast reminding you to switch back if needed.
-- The extension only converts Chinese text after cleaning common HTML, ruby, and TTML markup.
+- YouTube does not always expose caption tracks as standard `<track>` elements. The extension reads `ytInitialPlayerResponse` in the page to locate the Chinese track URL directly.
+- The extension only converts Chinese text after stripping HTML, ruby, and TTML markup.

@@ -19,7 +19,7 @@ const shared = {
 await Promise.all([
   esbuild.build({
     ...shared,
-    entryPoints: [join(root, 'content_script.js')],
+    entryPoints: [join(root, 'src', 'content_script.js')],
     outfile: join(dist, 'content_script.js')
   }),
   esbuild.build({

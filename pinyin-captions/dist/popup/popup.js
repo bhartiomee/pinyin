@@ -44,16 +44,25 @@ async function refresh() {
       : result.status;
     status.textContent = cueCount > 0
       ? `${cueCount} cues loaded - ${videoState} - ${matchState}`
-      : `${videoState} - ${debug ? `${debug.status} - ${debug.host}` : result.status}`;
+      : `${videoState} - ${debug ? `${debug.status} - ${formatDebugUrl(debug)}` : result.status}`;
     return;
   }
 
   status.textContent = cueCount > 0
     ? `${cueCount} cues loaded for this tab`
-    : debug ? `${debug.status} - ${debug.host}` : 'Waiting for subtitles...';
+    : debug ? `${debug.status} - ${formatDebugUrl(debug)}` : 'Waiting for subtitles...';
 }
 
 function renderState(isEnabled) {
   enabled.checked = isEnabled;
   stateText.textContent = isEnabled ? 'ON' : 'OFF';
+}
+
+function formatDebugUrl(debug) {
+  try {
+    const url = new URL(debug.url);
+    return `${url.host}${url.pathname}`;
+  } catch {
+    return debug.host || '';
+  }
 }

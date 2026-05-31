@@ -1,9 +1,12 @@
 const SUBTITLE_URL_RE = /(\.vtt(?:\?|$)|\.ttml(?:\?|$)|\.dfxp(?:\?|$)|\.xml(?:\?|$)|ttml2|webvtt|dfxp|subtitle|caption|timedtext|texttrack|text_track)/i;
+const NETFLIX_RANGE_RE = /^https:\/\/[^/]+\.nflxvideo\.net\/range\/(\d+)-(\d+)/i;
 const CHINESE_RE = /[\u4e00-\u9fff]/;
 const FETCHED_URLS = new Map();
 const CACHE_TTL_MS = 2 * 60 * 1000;
+const MAX_NETFLIX_RANGE_BYTES = 750 * 1024;
 const REQUEST_URLS = [
   '*://*.netflix.com/*',
+  '*://*.nflxvideo.net/*',
   '*://*.youtube.com/*',
   '*://*.primevideo.com/*',
   '*://*.disneyplus.com/*',
@@ -22,6 +25,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'PING_TAB_ID') {
     sendResponse({ id: sender.tab?.id ?? null });
   }
+
+  if (message?.type === 'FETCH_SUBTITLE_URL' && message.url && sender.tab?.id != null) {
+    fetchSubtitle(sender.tab.id, message.url)
+      .then(() => sendResponse({ ok: true }))
+      .catch(async error => {
+        await rememberSubtitleCandidate(sender.tab.id, message.url, `fetch error ${shortError(error)}`);
+        sendResponse({ ok: false, error: shortError(error) });
+      });
+    return true;
+  }
+
   return false;
 });
 
@@ -41,6 +55,7 @@ chrome.webRequest.onBeforeRequest.addListener(
     FETCHED_URLS.set(details.url, Date.now());
     fetchSubtitle(details.tabId, details.url).catch(error => {
       console.warn('Pinyin Captions: failed to inspect subtitle request', error);
+      rememberSubtitleCandidate(details.tabId, details.url, `fetch error ${shortError(error)}`);
     });
   },
   { urls: REQUEST_URLS }
@@ -79,21 +94,25 @@ async function fetchSubtitle(tabId, url) {
 
   const sample = cues.slice(0, 12).map(cue => cue.text).join(' ').slice(0, 500);
   const isChinese = CHINESE_RE.test(sample);
-  
-  // Always cache and send subtitles to content script
-  await cacheCues(tabId, cues);
+
+  if (!isChinese) {
+    await rememberSubtitleCandidate(tabId, url, `parsed ${cues.length} cues, not Chinese`);
+    return;
+  }
+
+  await cacheCues(tabId, cues, 'zh');
   
   chrome.tabs.sendMessage(tabId, { 
     type: 'SUBTITLE_CUES', 
     cues,
-    language: isChinese ? 'zh' : 'en'
+    language: 'zh'
   }, () => {
     if (chrome.runtime.lastError) {
       console.debug('Pinyin Captions: content script unavailable', chrome.runtime.lastError.message);
     }
   });
   
-  await rememberSubtitleCandidate(tabId, url, `sent ${cues.length} ${isChinese ? 'Chinese' : 'English'} cues`);
+  await rememberSubtitleCandidate(tabId, url, `sent ${cues.length} Chinese cues`);
 }
 
 function parseSubtitle(text, url = '') {
@@ -108,7 +127,34 @@ function parseSubtitle(text, url = '') {
 }
 
 function isSubtitleCandidateUrl(url) {
-  return SUBTITLE_URL_RE.test(url);
+  return SUBTITLE_URL_RE.test(url) || isLikelyNetflixSubtitleRange(url);
+}
+
+function looksLikeTextSubtitlePayload(text) {
+  const sample = String(text || '').slice(0, 1500);
+
+  if (!sample) {
+    return false;
+  }
+
+  if (/<(tt|p|text|span|body|div)\b/i.test(sample) || /WEBVTT/i.test(sample) || /-->/i.test(sample) || /"events"\s*:\s*\[/i.test(sample) || CHINESE_RE.test(sample)) {
+    return true;
+  }
+
+  const controlChars = sample.replace(/[\t\n\r -~\u0080-\uffff]/g, '').length;
+  return controlChars / sample.length < 0.05;
+}
+
+function isLikelyNetflixSubtitleRange(url) {
+  const match = url.match(NETFLIX_RANGE_RE);
+  if (!match) {
+    return false;
+  }
+
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const bytes = end - start + 1;
+  return Number.isFinite(bytes) && bytes > 0 && bytes <= MAX_NETFLIX_RANGE_BYTES;
 }
 
 function parseYouTubeTimedText(text) {
@@ -317,11 +363,12 @@ async function getEnabled() {
   return result.enabled !== false;
 }
 
-async function cacheCues(tabId, cues) {
+async function cacheCues(tabId, cues, language = 'zh') {
   const result = await chrome.storage.local.get({ cuesByTab: {} });
   const cuesByTab = result.cuesByTab || {};
   cuesByTab[String(tabId)] = {
     cues,
+    language,
     cueCount: cues.length,
     loadedAt: Date.now()
   };
@@ -352,4 +399,8 @@ function safeUrlHost(url) {
   } catch {
     return '';
   }
+}
+
+function shortError(error) {
+  return String(error?.message || error || 'unknown').slice(0, 80);
 }
